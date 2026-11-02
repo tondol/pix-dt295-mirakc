@@ -1,0 +1,27 @@
+# PIX-DT295 を挿した Linux ホストで:  docker compose up -d --build
+# 先に config.example.yml を config.yml にコピーして channels を編集しておく。
+services:
+  mirakc:
+    build: .
+    image: pix-tv-mirakc
+    container_name: mirakc
+    init: true            # SIGKILL された受信コマンドの子プロセスを回収する
+    privileged: true      # USB（/dev/bus/usb）を直接使う
+    restart: unless-stopped
+    ports:
+      - '40772:40772'
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
+      - ./config.yml:/etc/mirakc/config.yml:ro
+      - epg:/var/lib/mirakc/epg
+      - log:/var/log/pix
+    environment:
+      TZ: Asia/Tokyo
+      RUST_LOG: info
+      PIX_DT295_ACQ_XFER_BYTES: '2048'
+      PIX_DT295_XFERS: '32'
+      PIX_TV_MIN_GAP: '2.0'
+
+volumes:
+  epg:
+  log:

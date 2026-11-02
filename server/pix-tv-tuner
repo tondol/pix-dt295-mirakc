@@ -1,0 +1,49 @@
+#!/bin/bash
+# mirakc の受信コマンド: pix-tv-tuner <物理ch番号>（例: 20）。TS を標準出力に流す。
+#
+# mirakc は止めるとき、このプロセスだけに SIGKILL を送る（猶予なし）。そのまま pix-ts が
+# 出力先を失うと INTERNAL で異常終了してチューナーが中途半端な状態で残るので、
+#   - pix-ts の出力は「下流が閉じても読み捨てを続ける」中継を通す
+#   - 見張りプロセスがこのプロセスの消滅を検知して pix-ts に SIGTERM を送る
+#   - 選局処理中に止めると pixd が落ちるので、選局から最低 PIX_TV_MIN_GAP 秒は止めない
+#   - 前の受信の後片付けが終わるまで次の選局を flock で待たせる（ロックは子プロセスが持ち続ける）
+set -u
+CH="T${1#T}"
+R="${PIX_RUNTIME_DIR:-/run/pix}"
+INSTANCE="${PIX_INSTANCE:-tv}"
+MIN_GAP="${PIX_TV_MIN_GAP:-2.0}"
+LOG="${PIX_LOG_DIR:-/var/log/pix}/pix-ts.log"
+
+log() { echo "$(date '+%F %T.%3N') [$$] $*" >>"$LOG"; }
+
+exec 9>"$R/tuner.lock"
+flock 9
+log "tune $CH"
+
+# 前回の選局から MIN_GAP 秒は空ける
+now="$(date +%s.%N)"
+last="$(cat "$R/last-tune" 2>/dev/null || echo 0)"
+sleep "$(awk -v l="$last" -v n="$now" -v g="$MIN_GAP" 'BEGIN{w=l+g-n; printf("%.3f", w>0?w:0)}')"
+start="$(date +%s.%N)"
+echo "$start" >"$R/last-tune"
+
+pix-ts --runtime-dir "$R" --instance "$INSTANCE" -c "$CH" -o - 2>>"$LOG" \
+  > >(cat || exec cat >/dev/null) &
+TS_PID=$!
+SELF=$$
+
+# 見張り: このプロセスが消えたら（mirakc の SIGKILL）pix-ts を SIGTERM で止める
+(
+  while kill -0 "$SELF" 2>/dev/null && kill -0 "$TS_PID" 2>/dev/null; do sleep 0.2; done
+  kill -0 "$TS_PID" 2>/dev/null || exit 0
+  sleep "$(awk -v s="$start" -v n="$(date +%s.%N)" -v g="$MIN_GAP" 'BEGIN{w=s+g-n; printf("%.3f", w>0?w:0)}')"
+  log "stop $CH (pid $TS_PID)"
+  kill -TERM "$TS_PID" 2>/dev/null
+  for _ in $(seq 100); do kill -0 "$TS_PID" 2>/dev/null || break; sleep 0.1; done
+  kill -0 "$TS_PID" 2>/dev/null && { log "pix-ts が止まらないので KILL"; kill -KILL "$TS_PID"; }
+  log "stopped $CH"
+) &
+
+wait "$TS_PID"; rc=$?
+log "pix-ts exited $CH rc=$rc"
+exit "$rc"

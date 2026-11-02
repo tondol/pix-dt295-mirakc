@@ -22,7 +22,7 @@ SOFTWARE.
 
 ---
 
-Exception: dt295-xfer.patch is a modification of pix-userland
+Exception: server/dt295-xfer.patch is a modification of pix-userland
 (https://github.com/Khronos31/pix-userland) and is licensed under the
 GNU General Public License, version 2 or (at your option) any later version,
 the same terms as the pix-userland source it modifies.

@@ -23,23 +23,95 @@ index 612a6ec..ec77c24 100644
  int dt295_stream_start(libusb_context *context, libusb_device_handle *handle, dt295_stream **out);
  
 diff --git a/pix-dt295-receiver-adapter.cpp b/pix-dt295-receiver-adapter.cpp
-index f5db035..5488d7a 100644
+index 61ffce6..89bb361 100644
 --- a/pix-dt295-receiver-adapter.cpp
 +++ b/pix-dt295-receiver-adapter.cpp
-@@ -378,6 +378,7 @@ ReceiverAdapter::Result ReceiverAdapter::open(ReceiverId receiver) noexcept
+@@ -149,6 +149,60 @@ void ReceiverAdapter::initialize_device(const usb_selector& selector, int device
+     routes_ = dt295_routes_create();
+     if (routes_ == nullptr) return;
+     init_error_ = Error::OK;
++    renew_stop_.store(false, std::memory_order_release);
++    if (pthread_create(&renew_thread_, nullptr, renew_entry, this) == 0)
++        renew_joinable_ = true;
++    else
++        std::fprintf(stderr, "pix-tv: idle renewal thread failed to start\n");
++}
++
++/* pix-tv patch: the DT295 session must be renewed every 30 s (dt295_renew_if_due). Upstream only
++ * renews from pump(), i.e. while streaming, so an idle session expired after roughly 1-2 minutes:
++ * the next open failed with "card initialization requires authenticated idle state" (NO_CARD) and
++ * the device stayed in a state that only a USB power cycle cleared. Keep renewing while idle. */
++void ReceiverAdapter::renew_loop() noexcept
++{
++    std::uint64_t renewals = 0U, last_failure_log = 0U;
++    while (!renew_stop_.load(std::memory_order_acquire)) {
++        for (int i = 0; i < 10 && !renew_stop_.load(std::memory_order_acquire); ++i) {
++            const struct timespec slice{0, 100000000L};
++            nanosleep(&slice, nullptr);
++        }
++        if (renew_stop_.load(std::memory_order_acquire)) break;
++        int renewed = 0;
++        char error[256]{};
++        int failed = 0;
++        {
++            std::lock_guard<std::mutex> protocol_lock(protocol_mutex_);
++            if (device_ == nullptr || !dt295_has_session(device_)) continue;
++            failed = dt295_renew_if_due(device_, &renewed, error, sizeof(error));
++        }
++        const std::uint64_t now = clock_.monotonic_ms();
++        if (failed) {
++            if (last_failure_log == 0U || now - last_failure_log >= 60000U) {
++                std::fprintf(stderr, "pix-tv: session renewal failed: %s\n", error);
++                last_failure_log = now;
++            }
++        } else if (renewed && (renewals++ % 20U) == 0U) {
++            std::fprintf(stderr, "pix-tv: session renewed (renewal thread, #%llu)\n",
++                         static_cast<unsigned long long>(renewals));
++        }
++    }
++}
++
++void* ReceiverAdapter::renew_entry(void* opaque) noexcept
++{
++    static_cast<ReceiverAdapter*>(opaque)->renew_loop();
++    return nullptr;
++}
++
++void ReceiverAdapter::stop_renew_thread() noexcept
++{
++    renew_stop_.store(true, std::memory_order_release);
++    if (renew_joinable_) {
++        (void)pthread_join(renew_thread_, nullptr);
++        renew_joinable_ = false;
++    }
+ }
+ 
+ bool ReceiverAdapter::matches(ReceiverId receiver) const noexcept
+@@ -378,24 +432,31 @@ ReceiverAdapter::Result ReceiverAdapter::open(ReceiverId receiver) noexcept
      std::lock_guard<std::mutex> protocol_lock(protocol_mutex_);
      dt295_card_invalidate_observation(device_);
      char error[256]{};
 +    std::fprintf(stderr, "pix-tv: open begin session=%d\n", dt295_has_session(device_) ? 1 : 0);
      if (!dt295_has_session(device_)) {
          if (dt295_boot(device_, error, sizeof(error)) != 0) {
++            std::fprintf(stderr, "pix-tv: boot failed: %s\n", error);  /* pix-tv patch */
              dt295_card_invalidate_observation(device_);
-@@ -392,10 +393,12 @@ ReceiverAdapter::Result ReceiverAdapter::open(ReceiverId receiver) noexcept
+             return Result::failure(Error::USB_IO);
+         }
+         if (dt295_open_session(device_, error, sizeof(error)) != 0) {
++            std::fprintf(stderr, "pix-tv: open_session failed: %s\n", error);  /* pix-tv patch */
+             dt295_card_invalidate_observation(device_);
+             return Result::failure(Error::USB_IO);
+         }
+     }
+     if (dt295_card_initialize(device_, error, sizeof(error)) != 0) {
++        std::fprintf(stderr, "pix-tv: card initialize failed: %s\n", error);  /* pix-tv patch */
          dt295_card_invalidate_observation(device_);
          return Result::failure(Error::NO_CARD);
      }
 +    std::fprintf(stderr, "pix-tv: card initialized\n");
      if (dt295_card_activate(device_, 2000U, error, sizeof(error)) != 0) {
++        std::fprintf(stderr, "pix-tv: card activate failed: %s\n", error);  /* pix-tv patch */
          dt295_card_invalidate_observation(device_);
          return Result::failure(Error::NO_CARD);
      }
@@ -47,7 +119,7 @@ index f5db035..5488d7a 100644
      opened_ = true;
      {
          std::lock_guard<std::mutex> view_lock(acquisition_view_mutex_);
-@@ -467,6 +470,7 @@ dtv::userland::Result<TuneProgramming> ReceiverAdapter::program_hz(
+@@ -467,6 +528,7 @@ dtv::userland::Result<TuneProgramming> ReceiverAdapter::program_hz(
          if (satellite_tuned_ && dt295_sleep_satellite(device_, error, sizeof(error)) != 0)
              return TuneResult::failure(Error::USB_IO);
          satellite_tuned_ = false;
@@ -55,7 +127,7 @@ index f5db035..5488d7a 100644
          if (dt295_tune_terrestrial(device_, channel, error, sizeof(error)) != 0)
              return TuneResult::failure(Error::USB_IO);
          programmed_hz = center_for_channel(channel);
-@@ -865,6 +869,7 @@ ReceiverAdapter::Result ReceiverAdapter::ensure_streaming() noexcept
+@@ -865,6 +927,7 @@ ReceiverAdapter::Result ReceiverAdapter::ensure_streaming() noexcept
      key_retained_ = true;
      if (dt295_start(device_, error, sizeof(error)) != 0)
          return Result::failure(Error::USB_IO);
@@ -63,7 +135,7 @@ index f5db035..5488d7a 100644
      const auto started = start_stream_unlocked();
      if (!started) {
          size_t drained = 0U;
-@@ -922,6 +927,8 @@ void ReceiverAdapter::pump() noexcept
+@@ -926,6 +989,8 @@ void ReceiverAdapter::pump() noexcept
      const bool scan_mode = pump_scan_;
      bool normal_done = false;
      std::vector<std::uint8_t> residue;
@@ -72,7 +144,7 @@ index f5db035..5488d7a 100644
      residue.reserve(65536U + 188U);
      std::vector<std::uint8_t> publish_buffer;
      publish_buffer.reserve(65536U + 188U);
-@@ -969,6 +976,10 @@ void ReceiverAdapter::pump() noexcept
+@@ -973,6 +1038,10 @@ void ReceiverAdapter::pump() noexcept
              break;
          }
          if (count > 0) residue.insert(residue.end(), chunk, chunk + count);
@@ -83,7 +155,7 @@ index f5db035..5488d7a 100644
  
          std::size_t offset = 0U;
          bool terminal = false;
-@@ -1124,6 +1135,15 @@ void ReceiverAdapter::pump() noexcept
+@@ -1128,6 +1197,15 @@ void ReceiverAdapter::pump() noexcept
          if (!scan_mode && !plan_complete_ && count > 0) {
              dt295_routes_snapshot snapshot{};
              dt295_routes_snapshot_get(routes_, &snapshot);
@@ -99,7 +171,21 @@ index f5db035..5488d7a 100644
              if (plan_started_ && plan_tsid_valid_ && snapshot.have_pat &&
                  snapshot.tsid != plan_tsid_) {
                  std::fprintf(stderr,
-@@ -1222,6 +1242,7 @@ void ReceiverAdapter::pump() noexcept
+@@ -1154,9 +1232,12 @@ void ReceiverAdapter::pump() noexcept
+                                  Error::UNSUPPORTED);
+                 break;
+             }
++            /* pix-tv patch: upstream a31a43e also starts a partial plan as soon as CAT arrives.
++             * On terrestrial T17 that partial plan never delivered TS, and stopping it crashed
++             * pixd (PIX_CONTEXT_POLL error=255). Wait for every PMT as before a31a43e. */
+             const bool may_plan = snapshot.have_pat &&
+                                   (snapshot.ready || tuned_system_.load(std::memory_order_acquire) ==
+-                                                         ReceiverSystem::satellite || snapshot.have_cat);
++                                                         ReceiverSystem::satellite);
+             bool planned = false;
+             if (may_plan) {
+                 dt295_route_plan plan{};
+@@ -1226,6 +1307,7 @@ void ReceiverAdapter::pump() noexcept
                              break;
                          }
                          if (!acquisition_alive()) break;
@@ -107,6 +193,39 @@ index f5db035..5488d7a 100644
                          const auto restarted = start_stream_unlocked();
                          if (!restarted) {
                              fail_acquisition(AcquisitionFailure::usb,
+@@ -1471,6 +1553,7 @@ ReceiverAdapter::Result ReceiverAdapter::release_final(const Attachment& attachm
+ 
+ ReceiverAdapter::Result ReceiverAdapter::shutdown() noexcept
+ {
++    stop_renew_thread();  /* pix-tv patch: before the device context can be destroyed */
+     std::lock_guard<std::mutex> operation_lock(operation_mutex_);
+     Result outcome = Result::success();
+     bool scan_owned = false;
+diff --git a/pix-dt295-receiver-adapter.h b/pix-dt295-receiver-adapter.h
+index 3f841e4..e77c0ea 100644
+--- a/pix-dt295-receiver-adapter.h
++++ b/pix-dt295-receiver-adapter.h
+@@ -159,6 +159,10 @@ private:
+     Result ensure_streaming() noexcept;
+     void pump() noexcept;
+     static void* pump_entry(void*) noexcept;
++    /* pix-tv patch: renew the DT295 session while no stream is running (see renew_loop). */
++    void renew_loop() noexcept;
++    static void* renew_entry(void*) noexcept;
++    void stop_renew_thread() noexcept;
+     Result stop_attached(const Attachment&) noexcept;
+     void fail_acquisition(AcquisitionFailure, dtv::userland::detail::StreamTerminal,
+                           dtv::userland::Error) noexcept;
+@@ -229,6 +233,9 @@ private:
+     std::atomic<bool> deadline_timeout_pending_{false};
+     pthread_t pump_thread_{};
+     bool pump_joinable_ = false;
++    std::atomic<bool> renew_stop_{false};
++    pthread_t renew_thread_{};
++    bool renew_joinable_ = false;
+ };
+ 
+ }  // namespace pix::capture::dt295
 diff --git a/src/dt295_stream.c b/src/dt295_stream.c
 index 62aae04..1da66ec 100644
 --- a/src/dt295_stream.c

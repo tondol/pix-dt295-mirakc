@@ -1,12 +1,12 @@
-# setup.sh が取得・ビルドするドライバ本体
+# 上流の調査用に手元で clone するもの（追従手順で使う）
 /pix-userland/
 
-# names 用の Python 仮想環境
-/.venv/
-__pycache__/
+# 視聴クライアントのログ・個人設定
+/client/logs/
+/client/tv.conf
 
-# watch のログ・録画など
-/logs/
+# サーバーの個人設定
+/server/config.yml
+
 *.ts
-
 .DS_Store

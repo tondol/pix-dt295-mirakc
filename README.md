@@ -1,164 +1,197 @@
-# pix-tv — PIX-DT295 で macOS から地デジを見る
+# pix-tv — PIX-DT295 を mirakc のチューナーサーバーにする
 
-ピクセラの USB チューナー **PIX-DT295**（本来は Windows 専用）を、
-非公式のユーザー空間ドライバ [pix-userland](https://github.com/Khronos31/pix-userland) と mpv を使って
-Apple Silicon Mac で視聴・録画するためのスクリプト一式です。
+ピクセラの USB チューナー **PIX-DT295**（本来は Windows 専用）を、非公式のユーザー空間ドライバ
+[pix-userland](https://github.com/Khronos31/pix-userland) と [mirakc](https://github.com/mirakc/mirakc) で
+Docker のチューナーサーバーにするためのスクリプト一式です。ネットワーク越しに mpv で視聴・録画するクライアントも付いています。
 
-> pix-userland の DT295 対応は **試験段階** です（開発元の検証は macOS arm64・地上波のみ）。
-> BS/CS は実機でほぼ未確認です。さらにこのリポジトリでは独自パッチを当てています（後述）。
+> pix-userland の DT295 対応は **試験段階** です。BS/CS は実機でほぼ未確認です。
+> さらにこのリポジトリでは独自パッチを当てています（後述）。
 
-> **免責**: 本リポジトリは個人の非公式プロジェクトで、株式会社ピクセラおよび pix-userland 開発元とは無関係です。
+> **免責**: 本リポジトリは個人の非公式プロジェクトで、株式会社ピクセラ・pix-userland・mirakc の開発元とは無関係です。
 > メーカーのサポート対象外の使い方であり、無保証です。機器の故障・データの損失などについて作者は責任を負いません。
 > 受信した放送の録画・利用は私的使用の範囲で行ってください。
 
 ## 仕組み
 
 ```
-PIX-DT295 ──USB── pixd（デバイス管理デーモン。tv.sh が起動・終了）
-                    └─ pix-ts（MPEG-TS 受信）─ ffmpeg（指定局の映像・音声だけ抽出）─ mpv
+[サーバー: Linux + Docker]                                      [クライアント]
+PIX-DT295 ─USB─ pixd ─ pix-tv-tuner(pix-ts) ─ mirakc :40772 ─┬─HTTP── client/tv.sh ─ mpv
+                                                              └─HTTP── EPGStation / KonomiTV など
 ```
 
+- `server/`: mirakc の公式イメージに、パッチを当ててビルドした pix-userland（pixd / pix-ts）と受信ラッパーを載せたイメージ。
+  mirakc は Mirakurun 互換の API を持つので、EPGStation や KonomiTV などからもそのまま使えます。
+- `client/`: mirakc から局一覧を取ってきて mpv で見るスクリプト。局切替は mpv の中（Lua）で行います。
 - 放送のスクランブルは **チューナー本体内で B-CAS カードにより解除** されます。B-CAS カードを本体に挿しておく必要があります。
-- USB 転送の独自暗号は pix-userland が復元します（放送スクランブルとは別物）。
-- `watch` では mpv を開いたまま、局ごとに pix-ts → ffmpeg を張り替えて mpv に読み込ませ直します（JSON IPC で制御）。
 
-## 必要なもの
+## サーバー（Docker）
 
-- Apple Silicon Mac + Homebrew（`~/.homebrew` にも対応）
+### 必要なもの
+
+- Linux と Docker / Docker Compose v2。動作確認は x86_64（Synology DS920+ の Container Manager）
 - PIX-DT295 本体、B-CAS カード、地デジアンテナ
-- Xcode Command Line Tools（`python3`, `git`, コンパイラ）、`perl`（macOS 標準）
+- コンテナに USB を渡すため `privileged` で動かします
 
-## セットアップ
+### セットアップ
+
+`server/` ディレクトリをチューナーを挿したホストに置き、局の設定を作って起動します。
 
 ```sh
-git clone https://github.com/tondol/pix-tv-mac.git
-cd pix-tv-mac
-./setup.sh
+cd server
+cp config.example.yml config.yml         # channels はあとで自分の地域に合わせる
+docker compose up -d --build             # 初回はビルドに数分かかります
+docker compose exec mirakc pix-tv-scan   # T13〜T52 を走査（5 分ほど）。受信できた ch の設定を出力
 ```
 
-cmake / libusb / pkg-config / mpv を Homebrew で入れ、pix-userland（commit `38ef18e` 固定）を取得し、
-独自パッチ `dt295-xfer.patch` を当ててビルドします（ファームウェアは pixd に埋め込み）。
-最後にチューナー一覧が表示され、`"usb": "06b8:103b"` があれば OK。
-パッチを更新したときも `./setup.sh` を再実行すれば当て直して再ビルドします。
+`pix-tv-scan` が出力した `channels:` を `config.yml` に貼り付けて、`docker compose restart` してください。
+mirakc が各チャンネルのサービス（局のサブチャンネル）を自動で調べます。
+一部だけ調べるときは `pix-tv-scan 20 26` のようにチャンネル番号を渡します。
 
-## 使い方
-
-### テレビモード（おすすめ）
+別のマシンで編集して ssh 先へ送る場合は `deploy.sh` が使えます（`config.yml` が手元にあればそれも送ります）。
 
 ```sh
-./tv.sh              # NHK総合から開始（watch は省略できる）
-./tv.sh tx           # 局を指定して開始（キー / リモコン番号 / 物理ch: tx, 7, T23）
+./server/deploy.sh <ssh ホスト> <配置先ディレクトリ>
+```
+
+### 確認
+
+```sh
+curl http://<ホスト>:40772/api/services                # 局（サービス）の一覧
+docker compose logs -f                                  # mirakc のログ
+docker compose exec mirakc tail -f /var/log/pix/pixd.log /var/log/pix/pix-ts.log
+```
+
+mirakc に認証はありません。LAN や VPN（Tailscale など）の内側だけで公開してください。
+
+## クライアント
+
+### mpv で直接見る
+
+mirakc のストリームは HTTP の MPEG-TS なので、対応したプレイヤーならそのまま再生できます。
+
+```sh
+mpv http://<ホスト>:40772/api/services/<サービス ID>/stream
+```
+
+### client/tv.sh
+
+局の一覧表示・番号キーでの切替・録画をまとめたスクリプトです。
+`bash`・`mpv`・`curl`・`python3` を使います。macOS で動作確認しています（標準の bash 3.2 で動くように書いています）。
+Linux でも同じ手順で動く想定ですが、未確認です。
+
+```sh
+brew install mpv                         # mpv の導入（macOS の例）
+cd client
+echo 'PIX_TV_MIRAKC=http://<ホスト>:40772' > tv.conf    # 接続先（環境変数でも可）
+./tv.sh              # 視聴（リモコン番号が最小の局から）
+./tv.sh 5            # リモコン番号・局名の一部・サービス ID で局を指定（例: 5 / NHK / 3219235840）
+./tv.sh list         # 局一覧
+./tv.sh rec 1 1800   # 1800 秒録画（選んだ局のみ）。秒を省略すると Ctrl+C まで
 ```
 
 mpv のウィンドウ上で操作します。
 
 | キー | 動作 |
 |---|---|
-| `1`〜`8` | リモコン番号の局へ切替 |
+| `1`〜`9` | リモコン番号の局へ切替 |
 | `↑` / `↓` | 局リストの 1 つ上 / 下の局へ（端で反対側に回る） |
 | `l` | 局リストを 5 秒表示 |
 | 画面下の ◀◀ / ▶▶ ボタン | 前 / 次の局へ（`↑` / `↓` と同じ） |
-| `q` | 終了（チューナーの後片付けもここで行う） |
+| `q` | 終了 |
 
 - 切り替えると画面左上に全局リストが出て、選局中の局が黄色・太字（▶）になります。
-- 切り替えはキーを押してから映像が出るまで約 2〜3 秒です。
-- 連打した場合は最後の結果の局にだけ選局します（`↓↓↓` なら 3 つ先）。選局処理中にチューナーを止めると固まるため、選局と選局の間は最低 2 秒空けます。
-- 選局から 6 秒たってもデータが来ない場合は自動で選局し直し（最大 3 回）、だめなら「受信できません」と表示します。
-- pixd が停止した場合は「USB を挿し直してください」と表示して終了します。
-
-### その他のコマンド
-
-| コマンド | 内容 |
-|---|---|
-| `./tv.sh help` | 使い方を表示 |
-| `./tv.sh list` | 局一覧 |
-| `./tv.sh rec nhk 1800` | 1800 秒録画 → `~/Movies/`（物理チャンネルの TS 全体）。秒を省略すると Ctrl+C まで |
-| `./tv.sh scan` | T13〜T52 を走査して受信できる物理チャンネルを表示 |
-| `./tv.sh names T13 T20 …` | 各チャンネルの局名・サービス ID を表示（初回に ariblib を `.venv` へ導入） |
-| `./tv.sh diag T20 15` | テスト受信。0.5 秒ごとの状態と、時刻付きの pixd ログを表示（調査用） |
-
-`rec` と `diag` の局指定も watch と同じく キー / リモコン番号 / 物理ch を受け付けます。
-
-### 局一覧（静岡県内で受信確認済み）
-
-| キー | No | ch | 局 | サービス ID |
-|---|---|---|---|---|
-| nhk | 1 | T20 | NHK総合・静岡 | 35840 |
-| etv | 2 | T13 | NHK Eテレ・静岡 | 35848 |
-| tvk | 3 | T26 | tvk | 24632 |
-| sdt | 4 | T19 | 静岡第一テレビ | 35872 |
-| satv | 5 | T18 | 静岡朝日テレビ | 35880 |
-| sbs | 6 | T15 | SBS 静岡放送 | 35856 |
-| tx | 7 | T23 | テレ東 | 1072 |
-| sut | 8 | T17 | テレビ静岡 | 35864 |
-
-静岡の各局に加え、関東の tvk・テレ東も受信できています。
-局を足す・変える場合は `tv.sh` 冒頭の `STATIONS` を編集してください（`tv.sh names` で ch とサービス ID を調べられます）。
+- 連打した場合は最後の局にだけ選局します（`↓↓↓` なら 3 つ先）。
+- 一定時間たっても映像が出ない場合は自動で選局し直し（最大 3 回）、だめなら「受信できません」と表示します。
+- 局一覧は物理チャンネルごとにメインのサービス（サービス ID が最小のもの）だけを並べます。
+  サブチャンネルはサービス ID で指定すれば見られます。
 
 ## 設定（環境変数）
 
-`tv.sh` の既定値は環境変数で上書きできます（例: `PIX_TV_MIN_GAP=1.5 ./tv.sh watch`）。
+サーバー（`server/compose.yaml` の `environment`）
 
 | 変数 | 既定 | 内容 |
 |---|---|---|
 | `PIX_DT295_ACQ_XFER_BYTES` | 2048 | 番組表取得中の USB 転送サイズ（パッチ） |
 | `PIX_DT295_XFER_BYTES` | 65536 | 受信中の USB 転送サイズ（パッチ。上流と同じ） |
 | `PIX_DT295_XFERS` | 32 | 同時に投げる USB 転送数（パッチ。上流は 8） |
-| `PIX_TV_MIN_GAP` | 2.0 | 選局と選局の最小間隔（秒） |
-| `PIX_TV_WATCHDOG_SEC` | 6 | 受信が始まらないとき選局し直すまでの秒数 |
-| `PIX_TV_GEOMETRY` | `70%x63%+50%+50%` | mpv の初期ウィンドウ（mpv の `--geometry` 書式）。画面の幅 70%・高さ 63% で中央に置く（16:10 の MacBook でちょうど 16:9） |
+| `PIX_TV_MIN_GAP` | 2.0 | 選局と選局（停止）の最小間隔（秒）。選局処理中にチューナーを止めると pixd が落ちるため |
 
-## 独自パッチ（dt295-xfer.patch）
+クライアント（環境変数または `client/tv.conf`）
 
-選局から受信開始まで上流そのままだと約 13 秒かかっていたため、`setup.sh` が次の変更を pix-userland に当てます。
-環境変数を指定しなければ上流と同じ動作です（上流のテストもそのまま通ります）。
+| 変数 | 既定 | 内容 |
+|---|---|---|
+| `PIX_TV_MIRAKC` | `http://localhost:40772` | mirakc の URL |
+| `PIX_TV_REC_DIR` | `~/Movies`（無ければホーム） | 録画の保存先 |
+| `PIX_TV_WATCHDOG_SEC` | 12 | 映像が出ないとき選局し直すまでの秒数 |
+| `PIX_TV_GEOMETRY` | `70%x63%+50%+50%` | mpv の初期ウィンドウ（mpv の `--geometry` 書式）。画面の幅 70%・高さ 63% で中央に置く（16:10 の画面でちょうど 16:9） |
+
+## 独自パッチ（server/dt295-xfer.patch）
+
+イメージのビルド時に次の変更を pix-userland に当てます。
 
 1. **番組表取得中は USB 転送を小さくする**
    DT295 はバルク転送をバッファが満杯になるまで返しません。番組表（PSI）だけを通している取得中は
-   データが少なく、64 KiB の転送が埋まるまで約 10 秒待たされていました。
+   データが少なく、64 KiB の転送が埋まるまで約 10 秒待たされていました（上流のままだと選局に約 13 秒）。
    取得中だけ転送サイズを小さくし（`PIX_DT295_ACQ_XFER_BYTES`）、受信開始時に元のサイズへ戻します。
-2. **時刻計測用のログ**（`pix-tv:` で始まる行）を pixd に追加。
+2. **地デジは PMT がそろってから受信を始める**
+   上流 a31a43e 以降は CAT が先に届くと途中の段取りのまま受信を始めますが、その状態では TS が出ず、
+   止めたときに pixd が落ちる局がありました（T17 で確認）。a31a43e より前の動作に戻しています。
+3. **受信していない間もセッションを更新する**
+   DT295 のセッションは 30 秒ごとに更新（チャレンジ応答）が必要ですが、上流は受信中にしか更新しません。
+   そのため 1〜2 分選局しないとセッションが失効し、次の選局でカード初期化に失敗して（`NO_CARD`）、
+   USB を挿し直すまで使えなくなっていました。pixd に、受信していない間も更新を続けるスレッドを追加しています。
+4. **診断用のログ**（`pix-tv:` で始まる行）を pixd に追加。選局の各段階の時刻と、boot・カード初期化が失敗したときの理由を出します。
 
-実測（watch での切替）: キー入力 → 受信開始 約 6〜10 秒 → **約 1.3〜1.8 秒**（＋ ffmpeg/mpv 約 1 秒）。
+実測: 選局 → 受信開始 約 1.5 秒（PSI がそろうまで）。mirakc 経由でクライアントに映像が出るまで約 2〜3 秒。
+
+## 受信ラッパー（server/pix-tv-tuner）
+
+mirakc は受信コマンドを止めるとき SIGKILL を送ります。pix-ts がそのまま出力先を失うと異常終了し、
+チューナーが中途半端な状態で残るため、ラッパーで次のように扱います。
+
+- pix-ts の出力は、下流が閉じても読み捨てを続ける中継を通す
+- 見張りプロセスがラッパーの消滅を検知し、pix-ts を SIGTERM で正常に止める
+- 選局から `PIX_TV_MIN_GAP` 秒は止めない。次の選局は前の後片付けが終わるまで待つ
 
 ## トラブルシューティング
 
-- **`USB_IO` / `NO_CARD` で止まる、受信が始まらない**
-  異常終了のあとチューナーが中途半端な状態で残ることがあります。**USB を挿し直して** から再実行してください。
+- **選局できない（mirakc が 404、ログに `NO_CARD` / `USB_IO`）**
+  チューナーが中途半端な状態で残っています。**USB を挿し直して** から `docker compose restart` してください。
+  DT295 は前のセッションの状態を持ったまま残るため、コンテナの再起動・USB のリセットでは直らず、電源を切る必要があります。
+  原因は `docker compose exec mirakc grep -E 'failed|POLL' /var/log/pix/pixd.log` で確認できます。
 - **`B-CAS: present=unknown`**
-  表示上は不明でも受信できます。`NO_CARD`（終了コード 9）が出る場合はカードの向き・挿し込みを確認。
+  表示上は不明でも受信できます。`NO_CARD` が続く場合はカードの向き・挿し込みを確認。
 - **特定の局だけ映らない（「受信できません」）**
   チューナーが電波を掴めていません（ドライバはロック確認をしないため、データが来ないまま待ちます）。
-  上流の動作（`PIX_DT295_ACQ_XFER_BYTES=65536 PIX_DT295_XFERS=8 ./tv.sh diag <局> 25`）でも
-  来ない場合はアンテナ側の問題です。ケーブル・分配器・ブースターを確認してください。
+  アンテナ・ケーブル・分配器・ブースターを確認してください。
   深夜・早朝は送信所のメンテナンスで停波していることがあるので、時間をおいて再確認してください。
-- **全チャンネルで何も来ない（`stream packets=0`）**
-  アンテナケーブルの接触を確認。
-- **ログ**
-  `watch` は `logs/` に `mpv.log`, `ffmpeg.log`, `pix-ts.log`, `pixd.log`（UNIX 時刻付き）, `switch.log`（切替要求の時刻）, `ipc.log` を書き出します。
-  時刻を突き合わせると切替のどこで待っているかが分かります。
+- **PIX-DT295 が見つからない**（コンテナがすぐ終了する）
+  ホストで `lsusb` などに `06b8:103b` が出ているか、`/dev/bus/usb` を渡せているか確認してください。
 
 ## ファイル
 
 | ファイル | 内容 |
 |---|---|
-| `setup.sh` | 依存導入と pix-userland のビルド（パッチ適用込み） |
-| `dt295-xfer.patch` | pix-userland への独自パッチ（転送サイズ・計測ログ） |
-| `tv.sh` | 視聴・録画・スキャンなどのフロントエンド |
-| `sdt_names.py` | TS の SDT から局名を読む（ARIB 文字列は ariblib でデコード） |
-| `pix-userland/` | ドライバ本体（`setup.sh` が取得・ビルド） |
-| `.venv/` | `names` 用の Python 仮想環境 |
-| `logs/` | `watch` のログ |
+| `server/Dockerfile` | pix-userland のビルド（パッチ適用込み）と mirakc イメージへの組み込み |
+| `server/compose.yaml` | コンテナの設定（USB・ポート・ボリューム・環境変数） |
+| `server/config.example.yml` | mirakc の設定のひな形（`config.yml` にコピーして使う） |
+| `server/entrypoint.sh` | pixd を常駐させてから mirakc を起動 |
+| `server/pix-tv-tuner` | mirakc の受信コマンド（上記のラッパー） |
+| `server/pix-tv-scan` | 受信できるチャンネルを調べて `channels` 設定を出力 |
+| `server/deploy.sh` | ssh 先へ転送して `docker compose up -d --build` |
+| `server/dt295-xfer.patch` | pix-userland への独自パッチ |
+| `client/tv.sh` | 視聴・録画・局一覧 |
+| `client/tv.lua` | mpv 用の局切替スクリプト（tv.sh が読み込ませる） |
 
 ## 既知の制約
 
-- 同時受信は 1 系統のみ（地デジと BS/CS は排他）。
-- LNB 給電非対応（BS/CS アンテナへの給電は外部機器で）。
-- 字幕・データ放送・番組表（EPG）・予約録画は未対応。
-- `rec` は物理チャンネル単位で TS 全体を保存します（全サービス入り）。`watch` 中の録画は未対応。
+- 同時受信は 1 系統のみ（地デジと BS/CS は排他）。視聴中に別の局を選ぶと、mirakc はそれまでの受信を止めて切り替えます。
+- LNB 給電非対応（BS/CS アンテナへの給電は外部機器で）。BS/CS の設定は未対応。
+- 字幕・データ放送は `client/tv.sh` では未対応。番組表（EPG）は mirakc が取得しますが、`client/tv.sh` では表示しません
+  （EPGStation などを使ってください）。
 
 ## ライセンス
 
-- スクリプト類（`tv.sh` `setup.sh` `sdt_names.py` など）: MIT License（`LICENSE`）
-- `dt295-xfer.patch`: pix-userland の改変のため GPL-2.0-or-later
-- pix-userland 本体・ファームウェアは本リポジトリに含まれません（`setup.sh` が上流から取得します）。それぞれのライセンスに従ってください。
+- スクリプト類（`server/` `client/` のスクリプト・設定）: MIT License（`LICENSE`）
+- `server/dt295-xfer.patch`: pix-userland の改変のため GPL-2.0-or-later
+- pix-userland 本体・ファームウェア・mirakc は本リポジトリに含まれません（イメージのビルド時に上流から取得します）。それぞれのライセンスに従ってください。

@@ -1,0 +1,21 @@
+# mirakc の設定のひな形。config.yml にコピーして channels を自分の地域に合わせる。
+# 受信できるチャンネルは、起動後に `docker compose exec mirakc pix-tv-scan` で調べられる。
+# 書式: https://github.com/mirakc/mirakc/blob/main/docs/config.md
+epg:
+  cache-dir: /var/lib/mirakc/epg
+
+server:
+  addrs:
+    - http: '0.0.0.0:40772'
+
+# channel は物理チャンネル番号（T20 なら '20'）。サービス（局の各チャンネル）は mirakc が自動で調べる
+channels:
+  - { name: 'NHK総合', type: GR, channel: '27' }
+  - { name: 'NHKEテレ', type: GR, channel: '26' }
+
+tuners:
+  - name: dt295
+    types: [GR]
+    command: pix-tv-tuner {{{channel}}}
+    # 電波を掴めず TS が来ないときは早めに諦める（既定は 30 秒）
+    time-limit: 10000
