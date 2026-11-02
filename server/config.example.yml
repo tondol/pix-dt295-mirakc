@@ -1,5 +1,5 @@
 # mirakc の設定のひな形。config.yml にコピーして channels を自分の地域に合わせる。
-# 受信できるチャンネルは、起動後に `docker compose exec mirakc pix-tv-scan` で調べられる。
+# 受信できるチャンネルは、起動後に `docker compose exec mirakc pix-dt295-scan` で調べられる。
 # 書式: https://github.com/mirakc/mirakc/blob/main/docs/config.md
 epg:
   cache-dir: /var/lib/mirakc/epg
@@ -16,6 +16,6 @@ channels:
 tuners:
   - name: dt295
     types: [GR]
-    command: pix-tv-tuner {{{channel}}}
+    command: pix-dt295-tuner {{{channel}}}
     # 電波を掴めず TS が来ないときは早めに諦める（既定は 30 秒）
     time-limit: 10000

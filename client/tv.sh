@@ -1,15 +1,15 @@
 #!/bin/bash
 # mirakc の地デジを mpv で見る・録画する（macOS / Linux。macOS 標準の bash 3.2 でも動くように書く）
-#   接続先は PIX_TV_MIRAKC（既定 http://localhost:40772）。client/tv.conf に書いておける。
+#   接続先は TV_MIRAKC_URL（既定 http://localhost:40772）。client/tv.conf に書いておける。
 set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
 [ -f "$DIR/tv.conf" ] && . "$DIR/tv.conf"
-MIRAKC="${PIX_TV_MIRAKC:-http://localhost:40772}"; MIRAKC="${MIRAKC%/}"
-GEOMETRY="${PIX_TV_GEOMETRY:-70%x63%+50%+50%}"
-WATCHDOG_SEC="${PIX_TV_WATCHDOG_SEC:-12}"
+MIRAKC="${TV_MIRAKC_URL:-http://localhost:40772}"; MIRAKC="${MIRAKC%/}"
+GEOMETRY="${TV_GEOMETRY:-70%x63%+50%+50%}"
+WATCHDOG_SEC="${TV_WATCHDOG_SEC:-12}"
 # 録画先（既定は ~/Movies、無ければホーム）
-REC_DIR="${PIX_TV_REC_DIR:-$HOME/Movies}"; [ -d "$REC_DIR" ] || REC_DIR="$HOME"
+REC_DIR="${TV_REC_DIR:-$HOME/Movies}"; [ -d "$REC_DIR" ] || REC_DIR="$HOME"
 
 usage() {
   cat <<EOF
@@ -19,7 +19,7 @@ usage() {
   list                局一覧
   help                このヘルプ
 局は リモコン番号（1）・局名の一部（NHK）・サービス ID で指定。
-接続先: $MIRAKC（PIX_TV_MIRAKC で変更）
+接続先: $MIRAKC（TV_MIRAKC_URL で変更）
 EOF
 }
 
@@ -88,7 +88,7 @@ case "$CMD" in
       START="$(echo "$ALL" | awk -F'\t' -v id="$(echo "$line" | cut -f2)" '$2==id{print NR-1; exit}')"
       START="${START:-0}"
     fi
-    RUNTIME="$(mktemp -d /tmp/pixtv.XXXX)"; trap 'rm -rf "$RUNTIME"' EXIT
+    RUNTIME="$(mktemp -d /tmp/pix-dt295-mirakc.XXXX)"; trap 'rm -rf "$RUNTIME"' EXIT
     # 局一覧を mpv の Lua スクリプト（tv.lua）に JSON で渡す
     echo "$ALL" | python3 -c '
 import json, sys
@@ -101,7 +101,7 @@ print(json.dumps([dict(zip(("key", "id", "name", "ch"), l.rstrip("\n").split("\t
     # OSC の ◀◀ / ▶▶ を局の切替に割り当てる。ボタンを有効にするため loop-playlist=inf
     # really-quiet: 途中から受信するので切替直後は必ずデコードエラーが出る。端末には出さず mpv.log にだけ残す
     mpv --idle=yes --force-window=yes --keep-open=always --loop-playlist=inf \
-      --auto-window-resize=no --title='${?media-title:${media-title} - }pix-tv' --geometry="$GEOMETRY" \
+      --auto-window-resize=no --title='${?media-title:${media-title} - }pix-dt295-mirakc' --geometry="$GEOMETRY" \
       --script="$DIR/tv.lua" \
       --script-opts-append="tv-stations=$RUNTIME/stations.json" \
       --script-opts-append="tv-mirakc=$MIRAKC" \

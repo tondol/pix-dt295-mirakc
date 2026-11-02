@@ -24,5 +24,5 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends libusb-1.0-0 bash procps \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/ /usr/local/bin/
-COPY entrypoint.sh pix-tv-tuner pix-tv-scan /usr/local/bin/
+COPY entrypoint.sh pix-dt295-tuner pix-dt295-scan /usr/local/bin/
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

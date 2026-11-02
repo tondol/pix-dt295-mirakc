@@ -1,17 +1,17 @@
 #!/bin/bash
-# mirakc の受信コマンド: pix-tv-tuner <物理ch番号>（例: 20）。TS を標準出力に流す。
+# mirakc の受信コマンド: pix-dt295-tuner <物理ch番号>（例: 20）。TS を標準出力に流す。
 #
 # mirakc は止めるとき、このプロセスだけに SIGKILL を送る（猶予なし）。そのまま pix-ts が
 # 出力先を失うと INTERNAL で異常終了してチューナーが中途半端な状態で残るので、
 #   - pix-ts の出力は「下流が閉じても読み捨てを続ける」中継を通す
 #   - 見張りプロセスがこのプロセスの消滅を検知して pix-ts に SIGTERM を送る
-#   - 選局処理中に止めると pixd が落ちるので、選局から最低 PIX_TV_MIN_GAP 秒は止めない
+#   - 選局処理中に止めると pixd が落ちるので、選局から最低 PIX_DT295_MIN_GAP 秒は止めない
 #   - 前の受信の後片付けが終わるまで次の選局を flock で待たせる（ロックは子プロセスが持ち続ける）
 set -u
 CH="T${1#T}"
 R="${PIX_RUNTIME_DIR:-/run/pix}"
 INSTANCE="${PIX_INSTANCE:-tv}"
-MIN_GAP="${PIX_TV_MIN_GAP:-2.0}"
+MIN_GAP="${PIX_DT295_MIN_GAP:-2.0}"
 LOG="${PIX_LOG_DIR:-/var/log/pix}/pix-ts.log"
 
 log() { echo "$(date '+%F %T.%3N') [$$] $*" >>"$LOG"; }

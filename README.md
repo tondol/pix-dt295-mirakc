@@ -1,4 +1,4 @@
-# pix-tv — PIX-DT295 を mirakc のチューナーサーバーにする
+# pix-dt295-mirakc — PIX-DT295 を mirakc のチューナーサーバーにする
 
 ピクセラの USB チューナー **PIX-DT295**（本来は Windows 専用）を、非公式のユーザー空間ドライバ
 [pix-userland](https://github.com/Khronos31/pix-userland) と [mirakc](https://github.com/mirakc/mirakc) で
@@ -15,7 +15,7 @@ Docker のチューナーサーバーにするためのスクリプト一式で�
 
 ```
 [サーバー: Linux + Docker]                                      [クライアント]
-PIX-DT295 ─USB─ pixd ─ pix-tv-tuner(pix-ts) ─ mirakc :40772 ─┬─HTTP── client/tv.sh ─ mpv
+PIX-DT295 ─USB─ pixd ─ pix-dt295-tuner(pix-ts) ─ mirakc :40772 ─┬─HTTP── client/tv.sh ─ mpv
                                                               └─HTTP── EPGStation / KonomiTV など
 ```
 
@@ -40,12 +40,12 @@ PIX-DT295 ─USB─ pixd ─ pix-tv-tuner(pix-ts) ─ mirakc :40772 ─┬─HTT
 cd server
 cp config.example.yml config.yml         # channels はあとで自分の地域に合わせる
 docker compose up -d --build             # 初回はビルドに数分かかります
-docker compose exec mirakc pix-tv-scan   # T13〜T52 を走査（5 分ほど）。受信できた ch の設定を出力
+docker compose exec mirakc pix-dt295-scan   # T13〜T52 を走査（5 分ほど）。受信できた ch の設定を出力
 ```
 
-`pix-tv-scan` が出力した `channels:` を `config.yml` に貼り付けて、`docker compose restart` してください。
+`pix-dt295-scan` が出力した `channels:` を `config.yml` に貼り付けて、`docker compose restart` してください。
 mirakc が各チャンネルのサービス（局のサブチャンネル）を自動で調べます。
-一部だけ調べるときは `pix-tv-scan 20 26` のようにチャンネル番号を渡します。
+一部だけ調べるときは `pix-dt295-scan 20 26` のようにチャンネル番号を渡します。
 
 別のマシンで編集して ssh 先へ送る場合は `deploy.sh` が使えます（`config.yml` が手元にあればそれも送ります）。
 
@@ -82,7 +82,7 @@ Linux でも同じ手順で動く想定ですが、未確認です。
 ```sh
 brew install mpv                         # mpv の導入（macOS の例）
 cd client
-echo 'PIX_TV_MIRAKC=http://<ホスト>:40772' > tv.conf    # 接続先（環境変数でも可）
+echo 'TV_MIRAKC_URL=http://<ホスト>:40772' > tv.conf    # 接続先（環境変数でも可）
 ./tv.sh              # 視聴（リモコン番号が最小の局から）
 ./tv.sh 5            # リモコン番号・局名の一部・サービス ID で局を指定（例: 5 / NHK / 3219235840）
 ./tv.sh list         # 局一覧
@@ -114,16 +114,16 @@ mpv のウィンドウ上で操作します。
 | `PIX_DT295_ACQ_XFER_BYTES` | 2048 | 番組表取得中の USB 転送サイズ（パッチ） |
 | `PIX_DT295_XFER_BYTES` | 65536 | 受信中の USB 転送サイズ（パッチ。上流と同じ） |
 | `PIX_DT295_XFERS` | 32 | 同時に投げる USB 転送数（パッチ。上流は 8） |
-| `PIX_TV_MIN_GAP` | 2.0 | 選局と選局（停止）の最小間隔（秒）。選局処理中にチューナーを止めると pixd が落ちるため |
+| `PIX_DT295_MIN_GAP` | 2.0 | 選局と選局（停止）の最小間隔（秒）。選局処理中にチューナーを止めると pixd が落ちるため |
 
 クライアント（環境変数または `client/tv.conf`）
 
 | 変数 | 既定 | 内容 |
 |---|---|---|
-| `PIX_TV_MIRAKC` | `http://localhost:40772` | mirakc の URL |
-| `PIX_TV_REC_DIR` | `~/Movies`（無ければホーム） | 録画の保存先 |
-| `PIX_TV_WATCHDOG_SEC` | 12 | 映像が出ないとき選局し直すまでの秒数 |
-| `PIX_TV_GEOMETRY` | `70%x63%+50%+50%` | mpv の初期ウィンドウ（mpv の `--geometry` 書式）。画面の幅 70%・高さ 63% で中央に置く（16:10 の画面でちょうど 16:9） |
+| `TV_MIRAKC_URL` | `http://localhost:40772` | mirakc の URL |
+| `TV_REC_DIR` | `~/Movies`（無ければホーム） | 録画の保存先 |
+| `TV_WATCHDOG_SEC` | 12 | 映像が出ないとき選局し直すまでの秒数 |
+| `TV_GEOMETRY` | `70%x63%+50%+50%` | mpv の初期ウィンドウ（mpv の `--geometry` 書式）。画面の幅 70%・高さ 63% で中央に置く（16:10 の画面でちょうど 16:9） |
 
 ## 独自パッチ（server/dt295-xfer.patch）
 
@@ -140,18 +140,18 @@ mpv のウィンドウ上で操作します。
    DT295 のセッションは 30 秒ごとに更新（チャレンジ応答）が必要ですが、上流は受信中にしか更新しません。
    そのため 1〜2 分選局しないとセッションが失効し、次の選局でカード初期化に失敗して（`NO_CARD`）、
    USB を挿し直すまで使えなくなっていました。pixd に、受信していない間も更新を続けるスレッドを追加しています。
-4. **診断用のログ**（`pix-tv:` で始まる行）を pixd に追加。選局の各段階の時刻と、boot・カード初期化が失敗したときの理由を出します。
+4. **診断用のログ**（`pix-dt295-mirakc:` で始まる行）を pixd に追加。選局の各段階の時刻と、boot・カード初期化が失敗したときの理由を出します。
 
 実測: 選局 → 受信開始 約 1.5 秒（PSI がそろうまで）。mirakc 経由でクライアントに映像が出るまで約 2〜3 秒。
 
-## 受信ラッパー（server/pix-tv-tuner）
+## 受信ラッパー（server/pix-dt295-tuner）
 
 mirakc は受信コマンドを止めるとき SIGKILL を送ります。pix-ts がそのまま出力先を失うと異常終了し、
 チューナーが中途半端な状態で残るため、ラッパーで次のように扱います。
 
 - pix-ts の出力は、下流が閉じても読み捨てを続ける中継を通す
 - 見張りプロセスがラッパーの消滅を検知し、pix-ts を SIGTERM で正常に止める
-- 選局から `PIX_TV_MIN_GAP` 秒は止めない。次の選局は前の後片付けが終わるまで待つ
+- 選局から `PIX_DT295_MIN_GAP` 秒は止めない。次の選局は前の後片付けが終わるまで待つ
 
 ## トラブルシューティング
 
@@ -176,8 +176,8 @@ mirakc は受信コマンドを止めるとき SIGKILL を送ります。pix-ts 
 | `server/compose.yaml` | コンテナの設定（USB・ポート・ボリューム・環境変数） |
 | `server/config.example.yml` | mirakc の設定のひな形（`config.yml` にコピーして使う） |
 | `server/entrypoint.sh` | pixd を常駐させてから mirakc を起動 |
-| `server/pix-tv-tuner` | mirakc の受信コマンド（上記のラッパー） |
-| `server/pix-tv-scan` | 受信できるチャンネルを調べて `channels` 設定を出力 |
+| `server/pix-dt295-tuner` | mirakc の受信コマンド（上記のラッパー） |
+| `server/pix-dt295-scan` | 受信できるチャンネルを調べて `channels` 設定を出力 |
 | `server/deploy.sh` | ssh 先へ転送して `docker compose up -d --build` |
 | `server/dt295-xfer.patch` | pix-userland への独自パッチ |
 | `client/tv.sh` | 視聴・録画・局一覧 |

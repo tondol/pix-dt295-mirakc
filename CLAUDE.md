@@ -16,8 +16,8 @@ server/ … Docker イメージ（mirakc + pixd + 受信ラッパー）
   Dockerfile        pix-userland を PIX_COMMIT に固定して clone → dt295-xfer.patch → cmake で pixd/pixctl/pix-ts
                     → mirakc/mirakc:debian に載せる
   entrypoint.sh     USB の位置を調べて pixd を常駐（落ちたら作り直す）→ mirakc を exec
-  pix-tv-tuner      mirakc の tuners[].command。TS を stdout に出す（下の落とし穴 1〜3 の対策）
-  pix-tv-scan       受信できる物理 ch を調べて channels 設定を出力（docker compose exec mirakc pix-tv-scan）
+  pix-dt295-tuner      mirakc の tuners[].command。TS を stdout に出す（下の落とし穴 1〜3 の対策）
+  pix-dt295-scan       受信できる物理 ch を調べて channels 設定を出力（docker compose exec mirakc pix-dt295-scan）
   compose.yaml      privileged + /dev/bus/usb、init: true、named volume（epg・log）、40772 番
   config.example.yml / deploy.sh（ssh 先へ転送して compose up）
 client/ … 視聴スクリプト（macOS / Linux）
@@ -44,10 +44,10 @@ client/ … 視聴スクリプト（macOS / Linux）
    SIGKILL 後の孤児を回収するため compose で `init: true`。
 2. **pix-ts は出力先が閉じると `INTERNAL` で異常終了し、チューナーが中途半端な状態で残る**。
    対策: `> >(cat || exec cat >/dev/null)` で下流切断後も読み捨て、止めるときは pix-ts に SIGTERM。
-3. **選局処理中に pix-ts を止めると pixd が落ちる**（`PIX_CONTEXT_POLL error=255`）。選局から最低 `PIX_TV_MIN_GAP`（2 秒）は止めず、
+3. **選局処理中に pix-ts を止めると pixd が落ちる**（`PIX_CONTEXT_POLL error=255`）。選局から最低 `PIX_DT295_MIN_GAP`（2 秒）は止めず、
    次の選局は `flock` で前の後片付けが終わるまで待つ（ロックの fd は pix-ts・見張りが持ち続ける）。
 4. **ドライバはロック（電波捕捉）を確認しない**。掴めないと 0 パケットのまま待ち続ける →
-   サーバーは mirakc の `time-limit: 10000`、クライアントは tv.lua の見張り（`PIX_TV_WATCHDOG_SEC`、最大 3 回再選局）。
+   サーバーは mirakc の `time-limit: 10000`、クライアントは tv.lua の見張り（`TV_WATCHDOG_SEC`、最大 3 回再選局）。
 5. **pixd は runtime ディレクトリが 700 でないと拒否する**（pix-ts は `UNSUPPORTED`、pixd は `PIX_STAGE reserve error=11`）。entrypoint で chmod 700。
 6. Synology の docker は存在しないパスをバインドマウントできない → データは named volume にした。非対話 ssh では PATH に docker が無い（`/usr/local/bin` を足す）。
 7. mpv の `--geometry` は Retina では実ピクセル単位で位置もずれる → 画面比の `70%x63%+50%+50%` を既定に。
@@ -63,6 +63,9 @@ client/ … 視聴スクリプト（macOS / Linux）
     番組表取得のように約 60 秒間隔なら持つが、112 秒空くと失効した。→ パッチで pixd に更新スレッドを追加（1 秒ごとに期限を確認）。
     選局で代用する keepalive（120 秒ごと）は間に合わず失敗したので撤去した。
 13. ログは named volume に残るので、entrypoint の「pixd ready」待ちは今回の起動以降の行だけを見る（前回の行で早まると最初の選局が rc=3）。
+14. **コンテナを止めるときは pixd を正常終了させる**。entrypoint が `exec mirakc` していた頃は SIGTERM が pixd に届かず SIGKILL され、
+    DT295 がセッションを持ったまま固まった（再起動・更新のたびに挿し直しが必要だった）。今は trap で mirakc → 受信の後片付け → pixd の順に止め、
+    compose の `stop_grace_period: 30s`。`docker compose restart` 後に挿し直しなしで boot できることを確認済み（2026-11-02）。
 
 旧構成（Mac にチューナーを直結、tv.sh が pixd を起動して FIFO→ffmpeg→mpv）で得た知見:
 macOS の mpv は FIFO をパスで開くと極端に遅い（`ffmpeg://file:` で回避）、書き手の現れない FIFO を開くと mpv ごと固まる。
@@ -73,7 +76,7 @@ macOS の mpv は FIFO をパスで開くと極端に遅い（`ffmpeg://file:` �
 
 - `src/dt295_stream.c` / `include/dt295_stream.h`: バルク転送サイズ・本数を環境変数で可変（`PIX_DT295_XFER_BYTES`, `PIX_DT295_XFERS` 最大 32）。
   番組表取得中だけ `PIX_DT295_ACQ_XFER_BYTES`（compose 既定 2048）を使う。DT295 は転送が満杯になるまで返さないため、PSI だけ流れる取得中に 64KB だと 10 秒前後待たされていた。
-- `pix-dt295-receiver-adapter.cpp`: 取得開始/本番開始で `dt295_stream_set_acquisition_hint()` を呼ぶ。`pix-tv:` で始まる計測ログ（open / card / tune / first usb data / psi）と、
+- `pix-dt295-receiver-adapter.cpp`: 取得開始/本番開始で `dt295_stream_set_acquisition_hint()` を呼ぶ。`pix-dt295-mirakc:` で始まる計測ログ（open / card / tune / first usb data / psi）と、
   boot / open_session / card initialize / card activate が失敗したときの理由（上流は捨てていて、全部 USB_IO / NO_CARD としか分からない）。
   `may_plan` から `snapshot.have_cat` を外す（上流 a31a43e の部分プランを地デジで無効化。落とし穴 11）。
   `renew_loop()` スレッド: 受信していない間もセッションを更新する（落とし穴 12）。`shutdown()` の最初で止めて join する。
@@ -90,8 +93,8 @@ macOS の mpv は FIFO をパスで開くと極端に遅い（`ffmpeg://file:` �
    上流の README / docs で、pix-ts の未実装オプションや既知のバグ（報告候補）が直っていないかも見る。
 3. 最新に当たるか確認: `git worktree add --detach /private/tmp/claude-501/pu-latest origin/main` → `git apply --check -v <repo>/server/dt295-xfer.patch` → `git worktree remove --force`。
 4. **更新前のイメージで先に基準を測る**（受信状況は日によって変わるので同じ時間帯に比較）。視聴していないときに
-   `docker compose exec mirakc sh -c 'timeout 12 pix-tv-tuner 20 | wc -c'` を 2 回 → `/var/log/pix/pixd.log` の
-   `pix-tv: tune begin` → `first usb data` → `psi ... ready=1` の時刻差を記録する。
+   `docker compose exec mirakc sh -c 'timeout 12 pix-dt295-tuner 20 | wc -c'` を 2 回 → `/var/log/pix/pixd.log` の
+   `pix-dt295-mirakc: tune begin` → `first usb data` → `psi ... ready=1` の時刻差を記録する。
    2026-11-02 の基準（T20、NAS）: first usb data 約 0.8〜0.9 秒、ready 約 1.1〜1.7 秒。
 5. `server/Dockerfile` の `PIX_COMMIT` を書き換え → `server/deploy.sh <host> <dir>` → 同じ計測を 2 回で比較。
 6. 遅くなる・受信できない場合は `PIX_COMMIT` を戻す。問題なければ README・CLAUDE.md の commit 番号とこの節の最終確認日を更新し、

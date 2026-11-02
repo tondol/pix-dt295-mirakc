@@ -1,18 +1,18 @@
 #!/bin/bash
 # 受信できる地デジの物理チャンネルを探し、mirakc の channels 設定を出力する。
-#   docker compose exec mirakc pix-tv-scan            # T13〜T52 を全部（数分かかる）
-#   docker compose exec mirakc pix-tv-scan 20 26      # 指定したチャンネルだけ
+#   docker compose exec mirakc pix-dt295-scan            # T13〜T52 を全部（数分かかる）
+#   docker compose exec mirakc pix-dt295-scan 20 26      # 指定したチャンネルだけ
 # 実行中の mirakc とチューナーを取り合うので、視聴していないときに使う。
 set -u
-SEC="${PIX_TV_SCAN_SEC:-6}"
+SEC="${PIX_DT295_SCAN_SEC:-6}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 if [ $# -gt 0 ]; then CHS="$*"; else CHS="$(seq 13 52)"; fi
 
-echo "# pix-tv-scan $(date '+%F %T')（1ch あたり約 ${SEC} 秒）" >&2
+echo "# pix-dt295-scan $(date '+%F %T')（1ch あたり約 ${SEC} 秒）" >&2
 echo "channels:"
 for ch in $CHS; do
   ch="${ch#T}"
-  timeout -s TERM "$SEC" pix-tv-tuner "$ch" >"$TMP/t.ts" 2>/dev/null
+  timeout -s TERM "$SEC" pix-dt295-tuner "$ch" >"$TMP/t.ts" 2>/dev/null
   size="$(stat -c %s "$TMP/t.ts")"
   if [ "$size" -eq 0 ]; then
     echo "  T$ch: なし" >&2
