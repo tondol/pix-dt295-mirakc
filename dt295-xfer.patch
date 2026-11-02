@@ -1,0 +1,161 @@
+diff --git a/include/dt295_stream.h b/include/dt295_stream.h
+index 612a6ec..ec77c24 100644
+--- a/include/dt295_stream.h
++++ b/include/dt295_stream.h
+@@ -9,7 +9,7 @@
+ typedef struct dt295_stream dt295_stream;
+ 
+ enum {
+-    DT295_STREAM_TRANSFERS = 8,
++    DT295_STREAM_TRANSFERS = 32, /* pix-tv patch: max in-flight transfers (default 8 via env) */
+     DT295_STREAM_TRANSFER_BYTES = 65536,
+     DT295_STREAM_RING_BYTES = 32 * 1024 * 1024,
+     DT295_STREAM_RING_BLOCKS = DT295_STREAM_RING_BYTES / DT295_STREAM_TRANSFER_BYTES,
+@@ -28,6 +28,10 @@ typedef struct {
+     int stopping, thread_done;
+ } dt295_stream_stats;
+ 
++/* pix-tv patch: hint that the next dt295_stream_start() is for PSI acquisition (1) or
++ * for normal recording (0). Acquisition streams use PIX_DT295_ACQ_XFER_BYTES when set. */
++void dt295_stream_set_acquisition_hint(int acquiring);
++
+ /* POSIX/macOS implementation only. Other platforms return LIBUSB_ERROR_NOT_SUPPORTED. */
+ int dt295_stream_start(libusb_context *context, libusb_device_handle *handle, dt295_stream **out);
+ 
+diff --git a/pix-dt295-receiver-adapter.cpp b/pix-dt295-receiver-adapter.cpp
+index f5db035..5488d7a 100644
+--- a/pix-dt295-receiver-adapter.cpp
++++ b/pix-dt295-receiver-adapter.cpp
+@@ -378,6 +378,7 @@ ReceiverAdapter::Result ReceiverAdapter::open(ReceiverId receiver) noexcept
+     std::lock_guard<std::mutex> protocol_lock(protocol_mutex_);
+     dt295_card_invalidate_observation(device_);
+     char error[256]{};
++    std::fprintf(stderr, "pix-tv: open begin session=%d\n", dt295_has_session(device_) ? 1 : 0);
+     if (!dt295_has_session(device_)) {
+         if (dt295_boot(device_, error, sizeof(error)) != 0) {
+             dt295_card_invalidate_observation(device_);
+@@ -392,10 +393,12 @@ ReceiverAdapter::Result ReceiverAdapter::open(ReceiverId receiver) noexcept
+         dt295_card_invalidate_observation(device_);
+         return Result::failure(Error::NO_CARD);
+     }
++    std::fprintf(stderr, "pix-tv: card initialized\n");
+     if (dt295_card_activate(device_, 2000U, error, sizeof(error)) != 0) {
+         dt295_card_invalidate_observation(device_);
+         return Result::failure(Error::NO_CARD);
+     }
++    std::fprintf(stderr, "pix-tv: card active\n");
+     opened_ = true;
+     {
+         std::lock_guard<std::mutex> view_lock(acquisition_view_mutex_);
+@@ -467,6 +470,7 @@ dtv::userland::Result<TuneProgramming> ReceiverAdapter::program_hz(
+         if (satellite_tuned_ && dt295_sleep_satellite(device_, error, sizeof(error)) != 0)
+             return TuneResult::failure(Error::USB_IO);
+         satellite_tuned_ = false;
++        std::fprintf(stderr, "pix-tv: tune begin T%u\n", channel);
+         if (dt295_tune_terrestrial(device_, channel, error, sizeof(error)) != 0)
+             return TuneResult::failure(Error::USB_IO);
+         programmed_hz = center_for_channel(channel);
+@@ -865,6 +869,7 @@ ReceiverAdapter::Result ReceiverAdapter::ensure_streaming() noexcept
+     key_retained_ = true;
+     if (dt295_start(device_, error, sizeof(error)) != 0)
+         return Result::failure(Error::USB_IO);
++    dt295_stream_set_acquisition_hint(1);  /* pix-tv patch */
+     const auto started = start_stream_unlocked();
+     if (!started) {
+         size_t drained = 0U;
+@@ -922,6 +927,8 @@ void ReceiverAdapter::pump() noexcept
+     const bool scan_mode = pump_scan_;
+     bool normal_done = false;
+     std::vector<std::uint8_t> residue;
++    bool pixtv_first_logged = false, pixtv_pat_logged = false;  /* pix-tv patch: timing log */
++    unsigned pixtv_missing = 0U;
+     residue.reserve(65536U + 188U);
+     std::vector<std::uint8_t> publish_buffer;
+     publish_buffer.reserve(65536U + 188U);
+@@ -969,6 +976,10 @@ void ReceiverAdapter::pump() noexcept
+             break;
+         }
+         if (count > 0) residue.insert(residue.end(), chunk, chunk + count);
++        if (count > 0 && !pixtv_first_logged) {
++            pixtv_first_logged = true;
++            std::fprintf(stderr, "pix-tv: first usb data bytes=%d\n", count);
++        }
+ 
+         std::size_t offset = 0U;
+         bool terminal = false;
+@@ -1124,6 +1135,15 @@ void ReceiverAdapter::pump() noexcept
+         if (!scan_mode && !plan_complete_ && count > 0) {
+             dt295_routes_snapshot snapshot{};
+             dt295_routes_snapshot_get(routes_, &snapshot);
++            if (snapshot.have_pat && (!pixtv_pat_logged || snapshot.missing_pmts != pixtv_missing)) {
++                std::fprintf(stderr, "pix-tv: psi pat=1 programs=%u missing_pmts=%u cat=%u ready=%u\n",
++                             static_cast<unsigned>(snapshot.program_count),
++                             static_cast<unsigned>(snapshot.missing_pmts),
++                             static_cast<unsigned>(snapshot.have_cat),
++                             static_cast<unsigned>(snapshot.ready));
++                pixtv_pat_logged = true;
++                pixtv_missing = snapshot.missing_pmts;
++            }
+             if (plan_started_ && plan_tsid_valid_ && snapshot.have_pat &&
+                 snapshot.tsid != plan_tsid_) {
+                 std::fprintf(stderr,
+@@ -1222,6 +1242,7 @@ void ReceiverAdapter::pump() noexcept
+                             break;
+                         }
+                         if (!acquisition_alive()) break;
++                        dt295_stream_set_acquisition_hint(0);  /* pix-tv patch */
+                         const auto restarted = start_stream_unlocked();
+                         if (!restarted) {
+                             fail_acquisition(AcquisitionFailure::usb,
+diff --git a/src/dt295_stream.c b/src/dt295_stream.c
+index 62aae04..1da66ec 100644
+--- a/src/dt295_stream.c
++++ b/src/dt295_stream.c
+@@ -6,6 +6,9 @@
+ #include <string.h>
+ #include <time.h>
+ 
++static int dt295_acquisition_hint;
++void dt295_stream_set_acquisition_hint(int acquiring) { dt295_acquisition_hint = acquiring ? 1 : 0; }
++
+ #if defined(_WIN32) && !defined(DT295_STREAM_WINDOWS_ENABLE)
+ int dt295_stream_start(libusb_context *c, libusb_device_handle *h, dt295_stream **out) {
+     (void)c;
+@@ -275,7 +278,27 @@ int dt295_stream_start(libusb_context *context, libusb_device_handle *handle, dt
+     if (!out || !context || !handle)
+         return LIBUSB_ERROR_INVALID_PARAM;
+     *out = NULL;
+-    dt295_stream *s = allocate_stream(DT295_STREAM_RING_BLOCKS, DT295_STREAM_TRANSFERS);
++    /* pix-tv patch: the device only completes a bulk transfer once it is full, so while
++     * only PSI PIDs are routed (acquisition) a 64 KiB transfer can take ~10 s to fill.
++     * PIX_DT295_XFER_BYTES (512..65536, multiple of 512) and PIX_DT295_XFERS (1..32)
++     * allow smaller/more transfers. Defaults keep upstream behaviour (65536 x 8). */
++    unsigned xfer_bytes = DT295_STREAM_TRANSFER_BYTES, xfer_count = 8;
++    const char *env = getenv("PIX_DT295_XFER_BYTES");
++    if (dt295_acquisition_hint && getenv("PIX_DT295_ACQ_XFER_BYTES") &&
++        *getenv("PIX_DT295_ACQ_XFER_BYTES"))
++        env = getenv("PIX_DT295_ACQ_XFER_BYTES");
++    if (env && *env) {
++        long v = strtol(env, NULL, 10);
++        if (v >= 512 && v <= DT295_STREAM_TRANSFER_BYTES)
++            xfer_bytes = (unsigned)(v / 512 * 512);
++    }
++    env = getenv("PIX_DT295_XFERS");
++    if (env && *env) {
++        long v = strtol(env, NULL, 10);
++        if (v >= 1 && v <= DT295_STREAM_TRANSFERS)
++            xfer_count = (unsigned)v;
++    }
++    dt295_stream *s = allocate_stream(DT295_STREAM_RING_BLOCKS, xfer_count);
+     if (!s)
+         return LIBUSB_ERROR_NO_MEM;
+     s->context = context;
+@@ -290,7 +313,7 @@ int dt295_stream_start(libusb_context *context, libusb_device_handle *handle, dt
+             return LIBUSB_ERROR_NO_MEM;
+         }
+         libusb_fill_bulk_transfer(slot->transfer, handle, 0x81, slot->buffer,
+-                                  DT295_STREAM_TRANSFER_BYTES, transfer_complete, slot, 0);
++                                  (int)xfer_bytes, transfer_complete, slot, 0);
+     }
+     int rc = pthread_create(&s->thread, NULL, event_main, s);
+     if (rc) {
