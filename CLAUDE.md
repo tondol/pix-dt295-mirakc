@@ -57,11 +57,14 @@ client/ … 視聴スクリプト（macOS / Linux）
 10. **DT295 は一度固まると電源を切るまで戻らない**（`boot failed: firmware boot requires cold state 0 or unauthenticated state 16`）。
     前の pixd のセッション（鍵）を持ったまま残るため。sysfs の `authorized` 0→1 も `USBDEVFS_RESET` も効かなかった（2026-11-02）。
     固まる原因を作らないことが最優先。自動復旧するなら uhubctl 対応ハブでの電源の入れ直しが候補（未検証）。
-11. **上流 a31a43e の「CAT が来たら部分プランで開始」で、T17 は TS が出ないまま止まり、停止時に pixd が落ちた** → パッチで無効化（PMT がそろうまで待つ）。
+11. **上流 a31a43e の「CAT が来たら部分プランで開始」で、T17 は TS が出ないまま止まり、停止時に pixd が落ちた** → 38ef18e まではパッチで無効化していた。
+    5d8bd93 では無効化を外して T17 を 15 秒×3・選局 3 秒で停止×3 しても正常（2026-11-05）。ただしその試験で地デジの `state=partial` は
+    一度も起きておらず、上流の計画処理の書き直しで直ったのか再現しなかっただけかは不明。症状が戻ったらパッチ（`may_plan` から `snapshot.have_cat` を外す）を戻す。
 12. **1〜2 分選局しないと、次の open でカード初期化が失敗する（`card initialization requires authenticated idle state` → NO_CARD）**。
     DT295 のセッションは 30 秒ごとの更新（`dt295_renew_if_due`、チャレンジ応答）が必要なのに、上流は `pump()`（受信中）からしか呼ばない。
-    番組表取得のように約 60 秒間隔なら持つが、112 秒空くと失効した。→ パッチで pixd に更新スレッドを追加（1 秒ごとに期限を確認）。
-    選局で代用する keepalive（120 秒ごと）は間に合わず失敗したので撤去した。
+    番組表取得のように約 60 秒間隔なら持つが、112 秒空くと失効した。→ 38ef18e まではパッチで pixd に更新スレッドを足していた。
+    上流 5d8bd93 は close でセッションを終える（次の open で認証し直す。ログは毎回 `open begin session=0`）ので、アイドル中に失効するセッションが無い。
+    更新スレッドを外して 2 分 36 秒空けてから選局しても正常（2026-11-05）。
 13. ログは named volume に残るので、entrypoint の「pixd ready」待ちは今回の起動以降の行だけを見る（前回の行で早まると最初の選局が rc=3）。
 14. **コンテナを止めるときは pixd を正常終了させる**。entrypoint が `exec mirakc` していた頃は SIGTERM が pixd に届かず SIGKILL され、
     DT295 がセッションを持ったまま固まった（再起動・更新のたびに挿し直しが必要だった）。今は trap で mirakc → 受信の後片付け → pixd の順に止め、
@@ -80,15 +83,12 @@ macOS の mpv は FIFO をパスで開くと極端に遅い（`ffmpeg://file:` �
 
 ## 独自パッチ server/dt295-xfer.patch（pix-userland 5d8bd93 向け）
 
-選局から受信開始が上流で約 13 秒 → 約 1.5 秒。転送サイズは環境変数なしなら上流と同じだが、更新スレッドと部分プランの無効化は常に効く（上流テストは未実行）。
+選局から受信開始が上流で約 13 秒 → 約 1.5 秒。転送サイズは環境変数なしなら上流と同じ。BS の soft_fail は常に効く（上流テストは未実行）。
 
 - `src/dt295_stream.c` / `include/dt295_stream.h`: バルク転送サイズ・本数を環境変数で可変（`PIX_DT295_XFER_BYTES`, `PIX_DT295_XFERS` 最大 32）。
   番組表取得中だけ `PIX_DT295_ACQ_XFER_BYTES`（compose 既定 2048）を使う。DT295 は転送が満杯になるまで返さないため、PSI だけ流れる取得中に 64KB だと 10 秒前後待たされていた。
 - `pix-dt295-receiver-adapter.cpp`: 取得開始/本番開始で `dt295_stream_set_acquisition_hint()` を呼ぶ。`pix-dt295-mirakc:` で始まる計測ログ（open / card / tune / first usb data / psi）と、
   boot / open_session / card initialize / card activate が失敗したときの理由（上流は捨てていて、全部 USB_IO / NO_CARD としか分からない）。
-  `may_plan` から `snapshot.have_cat` を外す（上流 a31a43e の部分プランを地デジで無効化。落とし穴 11）。
-  `renew_loop()` スレッド: 受信していない間もセッションを更新する（落とし穴 12）。`shutdown()` の最初で止めて join する。
-  上流 5d8bd93 は close でセッションを終える（次の open で認証し直す）ようになったので、更新スレッドが要らなくなった可能性がある（未検証）。
 - `src/dt295.c`: 衛星のロック待ちのタイムアウト（`dt295_satellite_wait_lock`・TSID 指定の `dt295_tune_satellite`）を `soft_fail()` に（落とし穴 16）。
 - 以前は `src/dt295_routes.c` に地デジで CAT を待たない変更も入れていたが、上流 58085f0 で CAT 待ちが廃止されたので外した。
 - パッチを作り直すときは、手元に pix-userland を clone（gitignore 済み）して `PIX_COMMIT` を checkout → 当てて編集 → `git diff > ../server/dt295-xfer.patch`。
@@ -114,7 +114,7 @@ macOS の mpv は FIFO をパスで開くと極端に遅い（`ffmpeg://file:` �
 ## 状況・既知の問題
 
 - 2026-11-02: DS920+ のコンテナで受信・mirakc のサービス検出（8 局 22 サービス）・Mac からのストリーム取得まで確認。
-- アイドル後の NO_CARD は、セッション更新が受信中しか行われないことが原因（落とし穴 12）。パッチの更新スレッドで対処。
+- アイドル後の NO_CARD（落とし穴 12）は、上流 5d8bd93 が close でセッションを終えるようになって起きなくなった。
 - `B-CAS: present=unknown` は表示上のもので受信に支障なし。
 - BS: 2026-11-05 に 5d8bd93 + パッチで受信を確認（BS 全スキャン 48 通りで固まらない）。CS は未対応（上流で複数 ECM の録画が止まる）。
   DT295 は LNB 給電なし。
@@ -124,8 +124,6 @@ macOS の mpv は FIFO をパスで開くと極端に遅い（`ffmpeg://file:` �
 - それでも固まったときの自動復旧（uhubctl 対応ハブでの電源の入れ直し。未検証）。
 - EPGStation / KonomiTV を compose で後付け。
 - pix-userland への報告候補（未送付）:
-  バグ報告「DT295 のセッション更新が受信中しか行われず、アイドル 1〜2 分で失効して電源を切るまで復帰しない」
-  「a31a43e の部分プランで T17 が TS を出さず、停止時に pixd が落ちる」、
   Issue「取得中の 64KB 転送で選局が遅い」、PR「macOS で test ターゲットがビルドできない（mkdtemp 未宣言・`--wrap` 非対応）」
   「README の `pix-ts --control` / `--fail-on-drop` が未実装」、バグ報告「ロック未確認で 0 パケット rc=0」「選局中停止で pixd が落ちる」、
   バグ報告「DT295 で衛星のロック待ちがタイムアウトすると context が poisoned になり、挿し直すまで全選局が失敗する」（落とし穴 16）。
