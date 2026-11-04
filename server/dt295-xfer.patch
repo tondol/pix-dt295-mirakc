@@ -23,10 +23,10 @@ index 612a6ec..2459690 100644
  int dt295_stream_start(libusb_context *context, libusb_device_handle *handle, dt295_stream **out);
  
 diff --git a/pix-dt295-receiver-adapter.cpp b/pix-dt295-receiver-adapter.cpp
-index 61ffce6..2ecefb0 100644
+index afe79c8..6b025be 100644
 --- a/pix-dt295-receiver-adapter.cpp
 +++ b/pix-dt295-receiver-adapter.cpp
-@@ -149,6 +149,60 @@ void ReceiverAdapter::initialize_device(const usb_selector& selector, int device
+@@ -159,6 +159,60 @@ void ReceiverAdapter::initialize_device(const usb_selector& selector, int device
      routes_ = dt295_routes_create();
      if (routes_ == nullptr) return;
      init_error_ = Error::OK;
@@ -87,7 +87,7 @@ index 61ffce6..2ecefb0 100644
  }
  
  bool ReceiverAdapter::matches(ReceiverId receiver) const noexcept
-@@ -378,24 +432,31 @@ ReceiverAdapter::Result ReceiverAdapter::open(ReceiverId receiver) noexcept
+@@ -388,24 +442,31 @@ ReceiverAdapter::Result ReceiverAdapter::open(ReceiverId receiver) noexcept
      std::lock_guard<std::mutex> protocol_lock(protocol_mutex_);
      dt295_card_invalidate_observation(device_);
      char error[256]{};
@@ -119,7 +119,7 @@ index 61ffce6..2ecefb0 100644
      opened_ = true;
      {
          std::lock_guard<std::mutex> view_lock(acquisition_view_mutex_);
-@@ -467,6 +528,7 @@ dtv::userland::Result<TuneProgramming> ReceiverAdapter::program_hz(
+@@ -479,6 +540,7 @@ dtv::userland::Result<TuneProgramming> ReceiverAdapter::program_hz(
          if (satellite_tuned_ && dt295_sleep_satellite(device_, error, sizeof(error)) != 0)
              return TuneResult::failure(Error::USB_IO);
          satellite_tuned_ = false;
@@ -127,7 +127,7 @@ index 61ffce6..2ecefb0 100644
          if (dt295_tune_terrestrial(device_, channel, error, sizeof(error)) != 0)
              return TuneResult::failure(Error::USB_IO);
          programmed_hz = center_for_channel(channel);
-@@ -865,6 +927,7 @@ ReceiverAdapter::Result ReceiverAdapter::ensure_streaming() noexcept
+@@ -895,6 +957,7 @@ ReceiverAdapter::Result ReceiverAdapter::ensure_streaming() noexcept
      key_retained_ = true;
      if (dt295_start(device_, error, sizeof(error)) != 0)
          return Result::failure(Error::USB_IO);
@@ -135,7 +135,7 @@ index 61ffce6..2ecefb0 100644
      const auto started = start_stream_unlocked();
      if (!started) {
          size_t drained = 0U;
-@@ -926,6 +989,8 @@ void ReceiverAdapter::pump() noexcept
+@@ -958,6 +1021,8 @@ void ReceiverAdapter::pump() noexcept
      const bool scan_mode = pump_scan_;
      bool normal_done = false;
      std::vector<std::uint8_t> residue;
@@ -144,7 +144,7 @@ index 61ffce6..2ecefb0 100644
      residue.reserve(65536U + 188U);
      std::vector<std::uint8_t> publish_buffer;
      publish_buffer.reserve(65536U + 188U);
-@@ -973,6 +1038,10 @@ void ReceiverAdapter::pump() noexcept
+@@ -1005,6 +1070,10 @@ void ReceiverAdapter::pump() noexcept
              break;
          }
          if (count > 0) residue.insert(residue.end(), chunk, chunk + count);
@@ -155,7 +155,7 @@ index 61ffce6..2ecefb0 100644
  
          std::size_t offset = 0U;
          bool terminal = false;
-@@ -1128,6 +1197,15 @@ void ReceiverAdapter::pump() noexcept
+@@ -1160,6 +1229,15 @@ void ReceiverAdapter::pump() noexcept
          if (!scan_mode && !plan_complete_ && count > 0) {
              dt295_routes_snapshot snapshot{};
              dt295_routes_snapshot_get(routes_, &snapshot);
@@ -171,7 +171,7 @@ index 61ffce6..2ecefb0 100644
              if (plan_started_ && plan_tsid_valid_ && snapshot.have_pat &&
                  snapshot.tsid != plan_tsid_) {
                  std::fprintf(stderr,
-@@ -1154,9 +1232,12 @@ void ReceiverAdapter::pump() noexcept
+@@ -1186,9 +1264,12 @@ void ReceiverAdapter::pump() noexcept
                                   Error::UNSUPPORTED);
                  break;
              }
@@ -185,7 +185,7 @@ index 61ffce6..2ecefb0 100644
              bool planned = false;
              if (may_plan) {
                  dt295_route_plan plan{};
-@@ -1226,6 +1307,7 @@ void ReceiverAdapter::pump() noexcept
+@@ -1258,6 +1339,7 @@ void ReceiverAdapter::pump() noexcept
                              break;
                          }
                          if (!acquisition_alive()) break;
@@ -193,7 +193,7 @@ index 61ffce6..2ecefb0 100644
                          const auto restarted = start_stream_unlocked();
                          if (!restarted) {
                              fail_acquisition(AcquisitionFailure::usb,
-@@ -1471,6 +1553,7 @@ ReceiverAdapter::Result ReceiverAdapter::release_final(const Attachment& attachm
+@@ -1502,6 +1584,7 @@ ReceiverAdapter::Result ReceiverAdapter::release_final(const Attachment& attachm
  
  ReceiverAdapter::Result ReceiverAdapter::shutdown() noexcept
  {
@@ -202,10 +202,10 @@ index 61ffce6..2ecefb0 100644
      Result outcome = Result::success();
      bool scan_owned = false;
 diff --git a/pix-dt295-receiver-adapter.h b/pix-dt295-receiver-adapter.h
-index 3f841e4..33986b2 100644
+index 7006855..6664661 100644
 --- a/pix-dt295-receiver-adapter.h
 +++ b/pix-dt295-receiver-adapter.h
-@@ -159,6 +159,10 @@ private:
+@@ -160,6 +160,10 @@ private:
      Result ensure_streaming() noexcept;
      void pump() noexcept;
      static void* pump_entry(void*) noexcept;
@@ -216,7 +216,7 @@ index 3f841e4..33986b2 100644
      Result stop_attached(const Attachment&) noexcept;
      void fail_acquisition(AcquisitionFailure, dtv::userland::detail::StreamTerminal,
                            dtv::userland::Error) noexcept;
-@@ -229,6 +233,9 @@ private:
+@@ -232,6 +236,9 @@ private:
      std::atomic<bool> deadline_timeout_pending_{false};
      pthread_t pump_thread_{};
      bool pump_joinable_ = false;
@@ -226,6 +226,41 @@ index 3f841e4..33986b2 100644
  };
  
  }  // namespace pix::capture::dt295
+diff --git a/src/dt295.c b/src/dt295.c
+index 3889867..29b5da1 100644
+--- a/src/dt295.c
++++ b/src/dt295.c
+@@ -269,6 +269,12 @@ static int fail(dt295 *d, char *e, size_t n, const char *s) {
+     seterr(e, n, s);
+     return -1;
+ }
++/* 電波をつかめないだけの失敗（衛星のロック待ちのタイムアウト）。USB の手順は正常に終わっているので
++   コンテキストを壊れた扱いにせず、次の選局・停止を受け付ける（pix-dt295-mirakc patch） */
++static int soft_fail(char *e, size_t n, const char *s) {
++    seterr(e, n, s);
++    return -1;
++}
+ static int ctl(dt295 *d, uint8_t rt, uint8_t req, uint16_t val, uint16_t idx, uint8_t *buf,
+                size_t len, unsigned ms) {
+     size_t got = 0;
+@@ -1357,7 +1363,7 @@ int dt295_tune_satellite(dt295 *d, uint32_t if_hz, int tsid, char *e, size_t en)
+             if (state.locked && state.selected_tsid == (uint16_t)tsid)
+                 break;
+             if (now_ms(d) >= end)
+-                return fail(d, e, en, "satellite did not lock the target TSID");
++                return soft_fail(e, en, "satellite did not lock the target TSID");
+             sleep_ms(d, 100);
+         }
+     }
+@@ -1397,7 +1403,7 @@ int dt295_satellite_wait_lock(dt295 *d, unsigned timeout_ms, char *e, size_t en)
+             return 0;
+         }
+         if (now_ms(d) >= end)
+-            return fail(d, e, en, "satellite did not lock before the timeout");
++            return soft_fail(e, en, "satellite did not lock before the timeout");
+         sleep_ms(d, 100);
+     }
+ }
 diff --git a/src/dt295_stream.c b/src/dt295_stream.c
 index 62aae04..8a1563a 100644
 --- a/src/dt295_stream.c

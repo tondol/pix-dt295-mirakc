@@ -12,6 +12,8 @@ server:
 channels:
   - { name: 'NHK総合', type: GR, channel: '27' }
   - { name: 'NHKEテレ', type: GR, channel: '26' }
+  # BS はトランスポンダ番号_スロット番号（pix-dt295-scan bs で調べる）。使うなら tuners の types に BS を足す
+  # - { name: 'NHK BS', type: BS, channel: 'BS15_0' }
 
 tuners:
   - name: dt295

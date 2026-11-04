@@ -2,25 +2,27 @@
 # 受信できる地デジの物理チャンネルを探し、mirakc の channels 設定を出力する。
 #   docker compose exec mirakc pix-dt295-scan            # T13〜T52 を全部（数分かかる）
 #   docker compose exec mirakc pix-dt295-scan 20 26      # 指定したチャンネルだけ
+#   docker compose exec mirakc pix-dt295-scan bs         # BS（BS01〜BS23 の各スロット 0〜3）。BS は type: BS で書く
 # 実行中の mirakc とチューナーを取り合うので、視聴していないときに使う。
 set -u
 SEC="${PIX_DT295_SCAN_SEC:-6}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-if [ $# -gt 0 ]; then CHS="$*"; else CHS="$(seq 13 52)"; fi
+if [ "${1:-}" = bs ]; then CHS="$(for n in $(seq -w 1 2 23); do for s in 0 1 2 3; do echo "BS${n}_$s"; done; done)"
+elif [ $# -gt 0 ]; then CHS="$*"; else CHS="$(seq 13 52)"; fi
 
 echo "# pix-dt295-scan $(date '+%F %T')（1ch あたり約 ${SEC} 秒）" >&2
 echo "channels:"
 for ch in $CHS; do
-  ch="${ch#T}"
+  case "$ch" in BS*) label="$ch"; type=BS ;; *) ch="${ch#T}"; label="T$ch"; type=GR ;; esac
   timeout -s TERM "$SEC" pix-dt295-tuner "$ch" >"$TMP/t.ts" 2>/dev/null
   size="$(stat -c %s "$TMP/t.ts")"
   if [ "$size" -eq 0 ]; then
-    echo "  T$ch: なし" >&2
+    echo "  $label: なし" >&2
     continue
   fi
   # SDT から最初のサービス名を取る（サービス一覧の解析は mirakc-arib に任せる）
   name="$(mirakc-arib scan-services "$TMP/t.ts" 2>/dev/null \
     | grep -o '"name":"[^"]*"' | head -n 1 | cut -d'"' -f4)"
-  echo "  T$ch: ${name:-（局名不明）} ${size} bytes" >&2
-  echo "  - { name: '${name:-T$ch}', type: GR, channel: '$ch' }"
+  echo "  $label: ${name:-（局名不明）} ${size} bytes" >&2
+  echo "  - { name: '${name:-$label}', type: $type, channel: '$ch' }"
 done

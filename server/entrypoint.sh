@@ -23,7 +23,7 @@ LOGSTART="$(cat "$LOGDIR/pixd.log" 2>/dev/null | wc -l)"
 # pixd が落ちたら作り直す（落ちた後は USB の挿し直しが必要なことが多い）。停止中は作り直さない
 (
   while [ ! -f "$R/stopping" ]; do
-    pixd --device "usb:$PORT" --instance "$INSTANCE" --runtime-dir "$R" \
+    pixd --device "usb:$PORT" --firmware /usr/local/share/pix/dt295.bin --instance "$INSTANCE" --runtime-dir "$R" \
       2> >(stamp | tee -a "$LOGDIR/pixd.log" >&2) &
     echo $! >"$R/pixd.pid"
     wait $!

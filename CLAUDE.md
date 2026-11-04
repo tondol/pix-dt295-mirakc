@@ -14,10 +14,10 @@ PIXELA の USB チューナー **PIX-DT295**（本来 Windows 専用、VID:PID `
 ```
 server/ … Docker イメージ（mirakc + pixd + 受信ラッパー）
   Dockerfile        pix-userland を PIX_COMMIT に固定して clone → dt295-xfer.patch → cmake で pixd/pixctl/pix-ts
-                    → mirakc/mirakc:debian に載せる
+                    → mirakc/mirakc:debian に載せる。firmware/dt295.bin は /usr/local/share/pix/ に置き、pixd に --firmware で渡す
   entrypoint.sh     USB の位置を調べて pixd を常駐（落ちたら作り直す）→ mirakc を exec
-  pix-dt295-tuner      mirakc の tuners[].command。TS を stdout に出す（下の落とし穴 1〜3 の対策）
-  pix-dt295-scan       受信できる物理 ch を調べて channels 設定を出力（docker compose exec mirakc pix-dt295-scan）
+  pix-dt295-tuner      mirakc の tuners[].command。地デジは 20 / T20、BS は BS15_0。TS を stdout に出す（下の落とし穴 1〜3 の対策）
+  pix-dt295-scan       受信できる物理 ch を調べて channels 設定を出力（docker compose exec mirakc pix-dt295-scan [bs]）
   compose.yaml      privileged + /dev/bus/usb、init: true、named volume（epg・log）、40772 番
   config.example.yml / deploy.sh（ssh 先へ転送して compose up）
 client/ … 視聴スクリプト（macOS / Linux）
@@ -66,11 +66,19 @@ client/ … 視聴スクリプト（macOS / Linux）
 14. **コンテナを止めるときは pixd を正常終了させる**。entrypoint が `exec mirakc` していた頃は SIGTERM が pixd に届かず SIGKILL され、
     DT295 がセッションを持ったまま固まった（再起動・更新のたびに挿し直しが必要だった）。今は trap で mirakc → 受信の後片付け → pixd の順に止め、
     compose の `stop_grace_period: 30s`。`docker compose restart` 後に挿し直しなしで boot できることを確認済み（2026-11-02）。
+15. **上流 5d8bd93 から pix-ts は `--receiver ID` が必須、pixd は `--firmware FILE` が必須**（埋め込みの CMake オプションも廃止）。
+    `--receiver` が無いと pix-ts は `argument error` で rc=2 になり、mirakc の選局がすべて失敗する（受信ラッパーは `--receiver 0`）。
+16. **BS のロック待ちがタイムアウトすると DT295 が固まった**（上流の `fail()` はどんな失敗でも context を `poisoned` にするため、
+    以後は `boot failed: DT295 context unavailable` で地デジも含めて全滅し、挿し直しが必要）。電波の無いトランスポンダ・スロットを選ぶだけで起きる。
+    → パッチで衛星のロック待ちのタイムアウトだけ `soft_fail()`（poisoned にしない）。空きスロット（TSID 0）は上流でも poisoned にならない（rc=2）。
+    38ef18e では最初の BS 選局で `PIX_CONTEXT_POLL error=255` になり pixd ごと落ちた。5d8bd93 ではこれは起きない。
+17. mirakc は起動直後に全局の scan-services・update-schedules を回す（BS 込みで 15 分ほど）。その間に手動で pix-dt295-tuner を叩くと
+    flock で待たされたまま timeout になり 0 バイトに見える。試験は `/api/tuners` の users が空になってから。
 
 旧構成（Mac にチューナーを直結、tv.sh が pixd を起動して FIFO→ffmpeg→mpv）で得た知見:
 macOS の mpv は FIFO をパスで開くと極端に遅い（`ffmpeg://file:` で回避）、書き手の現れない FIFO を開くと mpv ごと固まる。
 
-## 独自パッチ server/dt295-xfer.patch（pix-userland 38ef18e 向け）
+## 独自パッチ server/dt295-xfer.patch（pix-userland 5d8bd93 向け）
 
 選局から受信開始が上流で約 13 秒 → 約 1.5 秒。転送サイズは環境変数なしなら上流と同じだが、更新スレッドと部分プランの無効化は常に効く（上流テストは未実行）。
 
@@ -80,12 +88,14 @@ macOS の mpv は FIFO をパスで開くと極端に遅い（`ffmpeg://file:` �
   boot / open_session / card initialize / card activate が失敗したときの理由（上流は捨てていて、全部 USB_IO / NO_CARD としか分からない）。
   `may_plan` から `snapshot.have_cat` を外す（上流 a31a43e の部分プランを地デジで無効化。落とし穴 11）。
   `renew_loop()` スレッド: 受信していない間もセッションを更新する（落とし穴 12）。`shutdown()` の最初で止めて join する。
+  上流 5d8bd93 は close でセッションを終える（次の open で認証し直す）ようになったので、更新スレッドが要らなくなった可能性がある（未検証）。
+- `src/dt295.c`: 衛星のロック待ちのタイムアウト（`dt295_satellite_wait_lock`・TSID 指定の `dt295_tune_satellite`）を `soft_fail()` に（落とし穴 16）。
 - 以前は `src/dt295_routes.c` に地デジで CAT を待たない変更も入れていたが、上流 58085f0 で CAT 待ちが廃止されたので外した。
 - パッチを作り直すときは、手元に pix-userland を clone（gitignore 済み）して `PIX_COMMIT` を checkout → 当てて編集 → `git diff > ../server/dt295-xfer.patch`。
 
 ## 上流 pix-userland への追従
 
-**最終確認: 2026-11-02（38ef18e）**。作業開始時にこの日付から 1 週間以上たっていたら、追従するか利用者に一言聞く。
+**最終確認: 2026-11-05（5d8bd93）**。作業開始時にこの日付から 1 週間以上たっていたら、追従するか利用者に一言聞く。
 
 1. 手元の `pix-userland/`（無ければ clone）で `git fetch origin` → `git log --oneline <PIX_COMMIT>..origin/main`。
    パッチ対象（`include/dt295_stream.h` `src/dt295_stream.c` `pix-dt295-receiver-adapter.cpp`）と、選局・PSI・CAT・停止処理まわりの変更を読む。
@@ -95,7 +105,8 @@ macOS の mpv は FIFO をパスで開くと極端に遅い（`ffmpeg://file:` �
 4. **更新前のイメージで先に基準を測る**（受信状況は日によって変わるので同じ時間帯に比較）。視聴していないときに
    `docker compose exec mirakc sh -c 'timeout 12 pix-dt295-tuner 20 | wc -c'` を 2 回 → `/var/log/pix/pixd.log` の
    `pix-dt295-mirakc: tune begin` → `first usb data` → `psi ... ready=1` の時刻差を記録する。
-   2026-11-02 の基準（T20、NAS）: first usb data 約 0.8〜0.9 秒、ready 約 1.1〜1.7 秒。
+   2026-11-05 の基準（5d8bd93、NAS、mirakc の起動時の選局から）: first usb data 約 0.8〜1.3 秒、ready 約 1.1〜1.7 秒。
+   起動時の mirakc の選局（scan-services）の pixd.log でも同じ時刻差が取れるので、手動の計測の代わりに使える。
 5. `server/Dockerfile` の `PIX_COMMIT` を書き換え → `server/deploy.sh <host> <dir>` → 同じ計測を 2 回で比較。
 6. 遅くなる・受信できない場合は `PIX_COMMIT` を戻す。問題なければ README・CLAUDE.md の commit 番号とこの節の最終確認日を更新し、
    利用者に `client/tv.sh` で切替の体感確認を頼む。
@@ -105,7 +116,8 @@ macOS の mpv は FIFO をパスで開くと極端に遅い（`ffmpeg://file:` �
 - 2026-11-02: DS920+ のコンテナで受信・mirakc のサービス検出（8 局 22 サービス）・Mac からのストリーム取得まで確認。
 - アイドル後の NO_CARD は、セッション更新が受信中しか行われないことが原因（落とし穴 12）。パッチの更新スレッドで対処。
 - `B-CAS: present=unknown` は表示上のもので受信に支障なし。
-- BS/CS は未着手（DT295 は LNB 給電なし）。
+- BS: 2026-11-05 に 5d8bd93 + パッチで受信を確認（BS 全スキャン 48 通りで固まらない）。CS は未対応（上流で複数 ECM の録画が止まる）。
+  DT295 は LNB 給電なし。
 
 ## 次にやりたいこと
 
@@ -115,4 +127,5 @@ macOS の mpv は FIFO をパスで開くと極端に遅い（`ffmpeg://file:` �
   バグ報告「DT295 のセッション更新が受信中しか行われず、アイドル 1〜2 分で失効して電源を切るまで復帰しない」
   「a31a43e の部分プランで T17 が TS を出さず、停止時に pixd が落ちる」、
   Issue「取得中の 64KB 転送で選局が遅い」、PR「macOS で test ターゲットがビルドできない（mkdtemp 未宣言・`--wrap` 非対応）」
-  「README の `pix-ts --control` / `--fail-on-drop` が未実装」、バグ報告「ロック未確認で 0 パケット rc=0」「選局中停止で pixd が落ちる」。
+  「README の `pix-ts --control` / `--fail-on-drop` が未実装」、バグ報告「ロック未確認で 0 パケット rc=0」「選局中停止で pixd が落ちる」、
+  バグ報告「DT295 で衛星のロック待ちがタイムアウトすると context が poisoned になり、挿し直すまで全選局が失敗する」（落とし穴 16）。
